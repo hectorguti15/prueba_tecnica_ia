@@ -57,8 +57,19 @@ def _is_read_only_query(query: str) -> bool:
     """Aplica una validacion basica para evitar operaciones de escritura."""
 
     normalized = query.strip().lower()
-    forbidden = ("create ", "merge ", "delete ", "detach ", "set ", "remove ", "drop ", "load csv")
-    return normalized.startswith(("match ", "with ", "call ")) and not any(word in normalized for word in forbidden)
+    forbidden = (
+        "create ",
+        "merge ",
+        "delete ",
+        "detach ",
+        "set ",
+        "remove ",
+        "drop ",
+        "load csv",
+        "call ",
+        "apoc.",
+    )
+    return normalized.startswith("match ") and not any(word in normalized for word in forbidden)
 
 
 def _serialize_record(value: Any) -> Any:

@@ -16,7 +16,6 @@ Aplicacion full stack para consultar en lenguaje natural un grafo de publicacion
 - [Ejemplos de Queries Cypher](#ejemplos-de-queries-cypher)
 - [Funcionamiento del Agente](#funcionamiento-del-agente)
 - [Limitaciones](#limitaciones)
-- [Ideas para Expandir el Grafo](#ideas-para-expandir-el-grafo)
 
 ## Arquitectura
 
@@ -564,17 +563,6 @@ Sophie Lauren -> Sophie Laurent
 - El LLM puede generar Cypher incorrecto; por eso el backend tiene validacion read-only, normalizacion y reintento de correccion.
 - El fuzzy match solo se activa si la consulta inicial no devuelve filas.
 - Las credenciales reales deben vivir en `.env`, nunca en Git.
-
-## Ideas para Expandir el Grafo
-
-- Agregar `DOI`, `url_publicacion`, `abstract`, `idioma` y `fuente_datos` a `Publicación`.
-- Modelar `Coautoria` si se quieren consultas directas entre autores.
-- Agregar propiedades a `ESCRIBIO`, como `orden_autor` o `autor_correspondencia`.
-- Incorporar embeddings para busqueda semantica por abstract o titulo.
-- Agregar metricas por venue, quartil, ranking o factor de impacto.
-- Incluir jerarquias de areas: por ejemplo `Machine Learning` como subarea de `IA`.
-- Agregar tests automatizados para prompts, validacion de Cypher y endpoints.
-- Dockerizar backend y frontend para despliegues reproducibles.
 
 ## Endpoints Principales
 

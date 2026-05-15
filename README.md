@@ -36,7 +36,8 @@ FastAPI
     |     2. Genera Cypher de lectura
     |     3. Ejecuta Neo4j
     |     4. Aplica fuzzy match si no hay resultados
-    |     5. Genera respuesta final en espanol
+    |     5. Aplica fallback semantico controlado para categorias
+    |     6. Genera respuesta final en espanol
     |
     +-- Neo4j AuraDB
           - grafo de publicaciones cientificas
@@ -505,7 +506,11 @@ execute_cypher
 route_after_execute
    |-- si hay resultados --> generate_answer
    |
-   |-- si no hay resultados --> fuzzy_match --> generate_answer
+   |-- si no hay resultados --> fuzzy_match
+                                |
+                                |-- si hay resultados --> generate_answer
+                                |
+                                |-- si no hay resultados --> semantic_fallback --> generate_answer
 ```
 
 ### Memoria conversacional
@@ -545,6 +550,16 @@ Ejemplo:
 Sophie Lauren -> Sophie Laurent
 ```
 
+### Fallback semantico
+
+Si no hay resultados exactos ni por fuzzy match, el nodo `semantic_fallback` intenta reinterpretar filtros categoricos usando solo valores reales existentes en Neo4j. Esta estrategia esta limitada a:
+
+- `area_ia`;
+- `palabra_clave`;
+- `tipo_venue`.
+
+El LLM no puede inventar categorias: recibe los valores disponibles del grafo y debe elegir uno o varios de esa lista. Por ejemplo, una busqueda amplia como `Inteligencia Artificial` puede reinterpretarse hacia categorias existentes como `IA Generativa` si el grafo no tiene un valor exacto con ese nombre.
+
 ## Limitaciones
 
 Esta seccion resume que quedo fuera y por que, siguiendo el alcance pedido en el enunciado.
@@ -559,10 +574,10 @@ Esta seccion resume que quedo fuera y por que, siguiendo el alcance pedido en el
 
 ### Agente y busqueda
 
-- **LangGraph en lugar de una cadena simple de LangChain**: se eligio LangGraph porque permite separar el flujo en nodos claros: generacion de Cypher, ejecucion, reintento por error, fuzzy match y respuesta final. Una cadena simple habria sido suficiente para el flujo minimo, pero era menos flexible para los extras implementados.
+- **LangGraph en lugar de una cadena simple de LangChain**: se eligio LangGraph porque permite separar el flujo en nodos claros: generacion de Cypher, ejecucion, reintento por error, fuzzy match, fallback semantico y respuesta final. Una cadena simple habria sido suficiente para el flujo minimo, pero era menos flexible para los extras implementados.
 - **Groq como proveedor LLM principal**: se eligio por facilidad de uso, baja latencia y disponibilidad de modelos en free tier. No se implementaron adaptadores activos para Gemini, OpenAI u Ollama; el proyecto queda preparado a nivel conceptual para cambiar de proveedor, pero el codigo actual llama a Groq.
 - **Validacion semantica independiente del Cypher**: el agente exige labels, relaciones y propiedades exactas desde el prompt y el backend bloquea consultas de escritura, pero no existe un validador semantico completo que parsee el Cypher antes de ejecutarlo. Los errores de sintaxis se corrigen con un reintento apoyado en Neo4j y el LLM.
-- **Busqueda semantica con embeddings**: no se implemento una busqueda vectorial sobre titulos, palabras clave o abstracts. Para mantener el alcance acotado, se uso Cypher con filtros textuales y fuzzy match cuando una consulta no devuelve resultados.
+- **Busqueda semantica con embeddings**: no se implemento una busqueda vectorial sobre titulos, palabras clave o abstracts. Para mantener el alcance acotado, se uso Cypher con filtros textuales, fuzzy match y un fallback semantico controlado solo para categorias.
 - **Memoria conversacional perfecta**: se implemento ventana deslizante con resumenes persistidos, pero en conversaciones muy largas o con referencias ambiguas el agente podria perder contexto fino. Se eligio esta estrategia por ser explicita, simple de auditar y suficiente para los casos pedidos.
 
 ### Aplicacion y seguridad

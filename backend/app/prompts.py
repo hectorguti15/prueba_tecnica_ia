@@ -82,6 +82,10 @@ Reglas obligatorias:
 - Usa solo MATCH, OPTIONAL MATCH, WHERE, WITH, RETURN, ORDER BY, SKIP y LIMIT.
 - No uses CREATE, MERGE, DELETE, DETACH DELETE, SET, REMOVE, DROP, LOAD CSV, CALL ni APOC.
 - Usa labels, relaciones y propiedades exactos del esquema.
+- Respeta siempre la direccion real de las relaciones del esquema.
+- Para autores de una publicacion usa:
+  MATCH (a:Autor)-[:ESCRIBIO]->(p:`Publicación` {{id_publicacion: "PUB001"}})
+  Nunca uses (p:`Publicación`)-[:ESCRIBIO]->(a:Autor).
 - Usa backticks en labels con tilde: `Publicación`, `Institución`, `País`, `Año`.
 - No pongas patrones de relación directamente dentro de WHERE.
   Incorrecto: WHERE condicion AND p-[:PUBLICADA_EN_AÑO]->(:`Año` {{año: 2024}})
@@ -97,6 +101,8 @@ Eres un asistente experto en Neo4j Cypher para una base de datos de publicacione
 Debes responder solo sobre este dominio:
 publicaciones académicas, autores, instituciones, países, áreas de IA, palabras clave,
 venues, años y citas.
+Si el usuario usa terminos como "libros", "papers", "articulos", "trabajos" o "documentos"
+en una pregunta sobre IA, interpretalos como publicaciones academicas del grafo.
 
 Esquema del grafo:
 {schema}
@@ -115,6 +121,8 @@ Objetivo:
 
 Reglas de dominio y seguridad:
 - Si la pregunta está fuera del dominio, responde exactamente: OUT_OF_DOMAIN
+- No marques como fuera de dominio una pregunta que use "libros", "papers", "articulos" o
+  "trabajos" si realmente esta pidiendo publicaciones del grafo.
 - Si el usuario pide crear, modificar, borrar, importar datos o cambiar el esquema, responde exactamente: OUT_OF_DOMAIN
 - Si está dentro del dominio, genera un único query Cypher de solo lectura.
 - El query debe iniciar con MATCH y debe usar únicamente cláusulas de lectura:
@@ -127,6 +135,15 @@ Reglas de dominio y seguridad:
 
 Reglas de esquema:
 - Usa SIEMPRE los labels, relaciones y propiedades exactos del esquema real.
+- Respeta SIEMPRE la direccion real de las relaciones del esquema.
+- Para obtener autores de una publicacion, el patron correcto es:
+  MATCH (a:Autor)-[:ESCRIBIO]->(p:`Publicación` {{id_publicacion: "PUB001"}})
+  Nunca generes: MATCH (p:`Publicación`)-[:ESCRIBIO]->(a:Autor)
+- Para consultas por pais, el pais se obtiene desde la institucion del autor:
+  MATCH (pais:`País`)<-[:UBICADA_EN]-(i:`Institución`)<-[:AFILIADO_A]-(a:Autor)-[:ESCRIBIO]->(p:`Publicación`)
+  Nunca conectes Venue con Institución; no existe (Venue)-[:AFILIADO_A]->(Institución).
+- Para preguntas como "autores de esta publicacion" o "autores de la ultima publicacion",
+  identifica la publicacion por `id_publicacion` desde la memoria y usa el patron Autor -> Publicacion.
 - Usa backticks en todos los labels con tilde: `Publicación`, `Institución`, `País`, `Año`.
 - Para una variable p con label `Publicación`, usa p.id_publicacion, p.titulo y p.numero_citas.
 - Para una variable a con label Autor, usa a.nombre_autor.
@@ -144,6 +161,14 @@ Reglas para filtros:
   WHERE toLower(variable.propiedad) CONTAINS toLower("texto")
 - Esta regla aplica a autores, títulos, instituciones, países, áreas, palabras clave, venues y tipo de venue.
 - Si hay varios filtros de texto, combina condiciones con AND u OR según lo pida la pregunta.
+- No reemplaces un termino del usuario por una categoria parecida durante la generacion inicial.
+  Usa el termino literal del usuario; si no hay resultados, el fallback semantico controlado elegira
+  una categoria existente cuando corresponda.
+- Para preguntas generales de tema como "sobre X", "hablan de X" o "relacionadas con X",
+  busca X en p.titulo y tambien en area_ia/palabra_clave cuando esas relaciones sean relevantes.
+  No filtres solo por palabra_clave si el usuario no pidio explicitamente palabras clave.
+- Para "revista", "revistas", "journal", "conferencia", "conference" o tipos de venue,
+  filtra sobre v.tipo_venue con toLower(v.tipo_venue) CONTAINS toLower("texto").
 - No uses funciones dentro de mapas de propiedades. Nunca generes patrones como:
   (a:Autor {{nombre_autor: toLower("texto")}})
 - Los mapas de propiedades solo se permiten para coincidencias exactas que no necesiten funciones,
@@ -160,6 +185,9 @@ Reglas para preguntas de seguimiento:
 - Si el historial identificó un autor, reutiliza el filtro case-insensitive sobre a.nombre_autor.
 - Si el historial tiene un Cypher anterior útil, puedes reutilizar su filtro, pero corrígelo si viola estas reglas.
 
+- Si el usuario pregunta "de estas", "de esos resultados" o "de las anteriores", conserva los filtros
+  del resultado anterior y agrega la nueva condicion solicitada.
+
 Reglas de resultado:
 - Devuelve columnas con alias claros en español para que la respuesta final sea comprensible.
 - Si filtras por autor, título, institución, país, área, palabra clave, venue o tipo de venue,
@@ -169,10 +197,56 @@ Reglas de resultado:
 - Si la pregunta pide un único valor o un top menor a 20, usa el límite menor correspondiente.
 - Si el usuario pide más de 20 filas o no especifica límite, usa LIMIT 20.
 - Si la pregunta pide "top", "más citadas", "mayor", "menor" o ranking, usa ORDER BY.
+  Si el usuario no especifica criterio para el top, ordena por p.numero_citas DESC.
   Cuando N sea mayor a 20, usa LIMIT 20; cuando N sea menor a 20, usa LIMIT N.
 
 Salida:
 - Devuelve solo el Cypher final corregido o OUT_OF_DOMAIN.
+"""
+
+SEMANTIC_FALLBACK_PROMPT = """
+Eres un modulo de interpretacion semantica para un agente Neo4j.
+
+La consulta original no encontro resultados exactos ni por fuzzy match.
+
+Pregunta del usuario:
+{question}
+
+Campo categorico filtrado:
+{property}
+
+Texto usado por el usuario en el filtro:
+{term}
+
+Valores existentes en Neo4j para ese campo:
+{candidates}
+
+Tarea:
+- Decide si el texto del usuario puede interpretarse como uno o varios valores existentes.
+- Solo puedes elegir valores que aparezcan exactamente en la lista de valores existentes.
+- No inventes categorias nuevas.
+- Este fallback solo aplica a areas de IA, palabras clave y tipo de venue.
+- Si el texto es demasiado ambiguo o no hay relacion semantica clara, no reintentes.
+- Si el usuario pide una categoria amplia y varios valores existentes pertenecen claramente a ella,
+  puedes devolver varios valores.
+- Si un valor existente es una forma especifica, abreviada o equivalente del texto del usuario,
+  puedes devolver solo ese valor.
+- Para tipo_venue, "revista" o "revistas" suelen corresponder a "Revista" si ese valor existe;
+  "conferencia" suele corresponder a "Conferencia" si ese valor existe.
+
+Devuelve solo JSON valido con esta forma:
+{{
+  "can_retry": true,
+  "values": ["valor exacto existente"],
+  "reason": "explicacion breve"
+}}
+
+Si no hay interpretacion confiable:
+{{
+  "can_retry": false,
+  "values": [],
+  "reason": "sin relacion clara"
+}}
 """
 
 ANSWER_PROMPT = """

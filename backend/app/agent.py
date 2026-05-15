@@ -14,6 +14,7 @@ from app.neo4j_client import neo4j_client
 from app.prompts import (
     ANSWER_PROMPT,
     CONTEXT_RESOLUTION_PROMPT,
+    CYPHER_CORRECTION_PROMPT,
     CYPHER_GENERATION_PROMPT,
     GRAPH_SCHEMA,
     OUT_OF_DOMAIN_RESPONSE,
@@ -160,6 +161,43 @@ def _ensure_filter_values_returned(cypher_query: str) -> str:
     return f"{before_return}RETURN {return_body}, {', '.join(additions)}{tail}"
 
 
+def _normalize_cypher_syntax(cypher_query: str) -> str:
+    """Corrige patrones comunes que el LLM genera con sintaxis Cypher invalida."""
+
+    normalized = _replace_where_relationship_pattern(cypher_query)
+    if normalized != cypher_query:
+        logger.info("Cypher normalizado para evitar patron de relacion dentro de WHERE")
+    return normalized
+
+
+def _replace_where_relationship_pattern(cypher_query: str) -> str:
+    """Convierte AND p-[:REL]->(Label {prop: value}) en EXISTS { MATCH ... }."""
+
+    pattern = re.compile(
+        r"(?P<connector>\b(?:AND|OR)\s+)"
+        r"(?P<source>\w+)\s*-\s*\[:(?P<relationship>[A-Z_Ñ]+)\]\s*->\s*"
+        r"\(\s*(?:(?P<target_var>\w+)\s*:\s*)?"
+        r"(?P<label>`[^`]+`|[A-Za-zÁÉÍÓÚÜÑáéíóúüñ_][\wÁÉÍÓÚÜÑáéíóúüñ]*)"
+        r"\s*\{\s*(?P<property>[A-Za-zÁÉÍÓÚÜÑáéíóúüñ_][\wÁÉÍÓÚÜÑáéíóúüñ]*)"
+        r"\s*:\s*(?P<value>[^}]+?)\s*\}\s*\)",
+        flags=re.IGNORECASE,
+    )
+
+    def replacement(match: re.Match[str]) -> str:
+        connector = match.group("connector")
+        source = match.group("source")
+        relationship = match.group("relationship")
+        label = match.group("label")
+        property_name = match.group("property")
+        value = match.group("value").strip()
+        return (
+            f"{connector}EXISTS {{ MATCH ({source})-[:{relationship}]->"
+            f"(:{label} {{{property_name}: {value}}}) }}"
+        )
+
+    return pattern.sub(replacement, cypher_query)
+
+
 def _normalize_text(value: str) -> str:
     """Normaliza texto para comparar coincidencias aproximadas sin acentos ni mayusculas."""
 
@@ -251,7 +289,7 @@ def _generate_cypher(state: AgentState) -> AgentState:
             "resolved_question": resolved_question,
         }
 
-    cypher = _ensure_filter_values_returned(cypher)
+    cypher = _prepare_cypher(cypher)
     logger.info("Cypher listo preview=%s", cypher[:180].replace("\n", " "))
     return {
         **state,
@@ -261,6 +299,12 @@ def _generate_cypher(state: AgentState) -> AgentState:
     }
 
 
+def _prepare_cypher(cypher_query: str) -> str:
+    """Aplica normalizaciones locales antes de ejecutar o reintentar un Cypher."""
+
+    return _ensure_filter_values_returned(_normalize_cypher_syntax(cypher_query))
+
+
 def _execute_cypher(state: AgentState) -> AgentState:
     """Segundo nodo LangGraph: ejecuta la consulta de lectura en Neo4j AuraDB."""
 
@@ -268,9 +312,58 @@ def _execute_cypher(state: AgentState) -> AgentState:
         return state
 
     logger.info("LangGraph node=execute_cypher")
-    results = neo4j_client.execute_read_query(state["cypher_query"])
+    try:
+        results = neo4j_client.execute_read_query(state["cypher_query"])
+    except Exception as exc:
+        if not _should_attempt_cypher_correction(exc):
+            raise
+
+        corrected_query = _correct_cypher_after_error(state, exc)
+        if not corrected_query or corrected_query == state["cypher_query"]:
+            raise
+
+        logger.info("Reintentando Cypher corregido preview=%s", corrected_query[:180].replace("\n", " "))
+        results = neo4j_client.execute_read_query(corrected_query)
+        logger.info("Neo4j devolvio rows=%s tras correccion", len(results))
+        return {**state, "cypher_query": corrected_query, "results": results}
+
     logger.info("Neo4j devolvio rows=%s", len(results))
     return {**state, "results": results}
+
+
+def _should_attempt_cypher_correction(exc: Exception) -> bool:
+    """Decide si vale la pena pedir correccion por error de sintaxis Cypher."""
+
+    error_type = type(exc).__name__.lower()
+    error_code = str(getattr(exc, "code", "")).lower()
+    error_text = summarize_exception(exc).lower()
+    return (
+        "syntax" in error_type
+        or "syntax" in error_code
+        or "statement.syntaxerror" in error_text
+        or "invalid input" in error_text
+    )
+
+
+def _correct_cypher_after_error(state: AgentState, exc: Exception) -> str | None:
+    """Pide al LLM corregir un Cypher que Neo4j rechazo por sintaxis."""
+
+    if not state["cypher_query"]:
+        return None
+
+    prompt = CYPHER_CORRECTION_PROMPT.format(
+        schema=GRAPH_SCHEMA,
+        question=state["resolved_question"],
+        cypher_query=state["cypher_query"],
+        error=summarize_exception(exc),
+    )
+    corrected = _strip_code_fences(_invoke_llm(prompt))
+    if corrected.strip() == "OUT_OF_DOMAIN":
+        return None
+
+    corrected = _prepare_cypher(corrected)
+    logger.info("Cypher corregido raw_length=%s", len(corrected))
+    return corrected
 
 
 def _extract_text_filters(cypher_query: str) -> list[dict[str, str]]:
@@ -365,7 +458,7 @@ def _replace_filter_term(cypher_query: str, property_name: str, original: str, r
 def _apply_fuzzy_match(state: AgentState) -> AgentState:
     """Canoniza filtros textuales y reintenta consultas con coincidencias >= 90%."""
 
-    if state["out_of_domain"] or not state["cypher_query"]:
+    if state["out_of_domain"] or state["results"] or not state["cypher_query"]:
         return state
 
     logger.info("LangGraph node=fuzzy_match")
@@ -391,7 +484,7 @@ def _apply_fuzzy_match(state: AgentState) -> AgentState:
     if corrected_query == state["cypher_query"]:
         return {**state, "fuzzy_audit": fuzzy_audit}
 
-    corrected_query = _ensure_filter_values_returned(corrected_query)
+    corrected_query = _prepare_cypher(corrected_query)
     fuzzy_results = neo4j_client.execute_read_query(corrected_query)
     logger.info("Fuzzy reintento rows=%s audit_count=%s", len(fuzzy_results), len(fuzzy_audit))
     if not fuzzy_results:
@@ -438,6 +531,12 @@ def _route_after_cypher(state: AgentState) -> str:
     return "finish" if state["out_of_domain"] else "execute_cypher"
 
 
+def _route_after_execute(state: AgentState) -> str:
+    """Ejecuta fuzzy match solo cuando Neo4j no encontro filas."""
+
+    return "generate_answer" if state["results"] else "fuzzy_match"
+
+
 def build_graph():
     """Compila el flujo LangGraph usado por el endpoint de mensajes."""
 
@@ -453,7 +552,11 @@ def build_graph():
         _route_after_cypher,
         {"execute_cypher": "execute_cypher", "finish": END},
     )
-    graph.add_edge("execute_cypher", "fuzzy_match")
+    graph.add_conditional_edges(
+        "execute_cypher",
+        _route_after_execute,
+        {"generate_answer": "generate_answer", "fuzzy_match": "fuzzy_match"},
+    )
     graph.add_edge("fuzzy_match", "generate_answer")
     graph.add_edge("generate_answer", END)
     return graph.compile()

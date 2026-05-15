@@ -61,6 +61,36 @@ Devuelve solo JSON valido con esta forma:
 }}
 """
 
+CYPHER_CORRECTION_PROMPT = """
+Eres un corrector experto de Neo4j Cypher para una base de datos de publicaciones académicas.
+
+Esquema real:
+{schema}
+
+Pregunta del usuario ya resuelta:
+{question}
+
+Cypher con error:
+{cypher_query}
+
+Error de Neo4j:
+{error}
+
+Reglas obligatorias:
+- Devuelve un único query Cypher corregido de solo lectura.
+- El query debe iniciar con MATCH.
+- Usa solo MATCH, OPTIONAL MATCH, WHERE, WITH, RETURN, ORDER BY, SKIP y LIMIT.
+- No uses CREATE, MERGE, DELETE, DETACH DELETE, SET, REMOVE, DROP, LOAD CSV, CALL ni APOC.
+- Usa labels, relaciones y propiedades exactos del esquema.
+- Usa backticks en labels con tilde: `Publicación`, `Institución`, `País`, `Año`.
+- No pongas patrones de relación directamente dentro de WHERE.
+  Incorrecto: WHERE condicion AND p-[:PUBLICADA_EN_AÑO]->(:`Año` {{año: 2024}})
+  Correcto: MATCH (p)-[:PUBLICADA_EN_AÑO]->(anio:`Año`) WHERE condicion AND anio.año = 2024
+- Para filtros de texto usa toLower(propiedad) CONTAINS toLower("texto").
+- Incluye LIMIT 20 salvo conteos o agregaciones.
+- No expliques nada. No uses markdown. Devuelve solo Cypher.
+"""
+
 CYPHER_GENERATION_PROMPT = """
 Eres un asistente experto en Neo4j Cypher para una base de datos de publicaciones académicas.
 
@@ -91,6 +121,9 @@ Reglas de dominio y seguridad:
   MATCH, OPTIONAL MATCH, WHERE, WITH, RETURN, ORDER BY, SKIP y LIMIT.
 - No uses CREATE, MERGE, DELETE, DETACH DELETE, SET, REMOVE, DROP, LOAD CSV, CALL ni APOC.
 - No agregues explicaciones, comentarios, markdown ni bloques de código.
+- Nunca coloques un patrón de relación directamente dentro de WHERE.
+  Incorrecto: WHERE condicion AND p-[:PUBLICADA_EN_AÑO]->(:`Año` {{año: 2024}})
+  Correcto: MATCH (p)-[:PUBLICADA_EN_AÑO]->(anio:`Año`) WHERE condicion AND anio.año = 2024
 
 Reglas de esquema:
 - Usa SIEMPRE los labels, relaciones y propiedades exactos del esquema real.

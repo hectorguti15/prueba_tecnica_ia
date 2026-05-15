@@ -5,7 +5,10 @@ export default function ChatList({ chats, activeChatId, onNewChat, onSelectChat 
   return (
     <aside className="chat-list">
       <div className="chat-list-header">
-        <h2>Chats</h2>
+        <div>
+          <p className="eyebrow">Neo4j</p>
+          <h2>Conversaciones</h2>
+        </div>
         <button type="button" className="primary-button" onClick={onNewChat}>
           Nuevo
         </button>

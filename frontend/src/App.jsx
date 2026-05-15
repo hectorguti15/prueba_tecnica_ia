@@ -103,6 +103,7 @@ export default function App() {
             <p className="eyebrow">Agente IA</p>
             <h1>{activeChat?.title || "Consulta publicaciones academicas"}</h1>
           </div>
+          <div className="status-pill">Neo4j conectado</div>
         </header>
         {error && <div className="error-banner">{error}</div>}
         <ChatWindow messages={messages} loading={loading} onSendMessage={handleSendMessage} />

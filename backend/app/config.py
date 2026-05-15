@@ -27,9 +27,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://postgres:postgres@localhost:5432/agente_neo4j"
 
     # Proveedor LLM configurable. Solo se usa la API key del proveedor seleccionado.
-    llm_provider: str = "gemini"
-    gemini_api_key: str | None = None
-    gemini_model: str = "gemini-3.1-flash-lite"
+    llm_provider: str = "groq"
     groq_api_key: str | None = None
     groq_model: str = "llama-3.3-70b-versatile"
 

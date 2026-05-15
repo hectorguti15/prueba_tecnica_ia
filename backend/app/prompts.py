@@ -33,6 +33,34 @@ OUT_OF_DOMAIN_RESPONSE = (
     "de publicaciones académicas."
 )
 
+CONTEXT_RESOLUTION_PROMPT = """
+Eres un modulo de memoria conversacional para un agente Neo4j.
+
+Memoria activa:
+{history}
+
+Pregunta original del usuario:
+{question}
+
+Tarea:
+- Reescribe la pregunta original como una pregunta autonoma y explicita.
+- Usa la memoria activa cuando la pregunta dependa de referencias previas, pronombres,
+  demostrativos, elipsis, menciones temporales o entidades mencionadas antes.
+- No dependas de listas de palabras clave: infiere semanticamente si hay referencia al contexto.
+- Si la pregunta ya es autonoma, conserva el mismo significado.
+- No inventes datos que no aparezcan en la memoria.
+- Si una referencia apunta a una publicacion con id_publicacion conocido, incluye ese id.
+- Si una referencia apunta a un autor, titulo, area, pais, palabra clave o venue reciente,
+  incluye el valor real mas especifico disponible.
+
+Devuelve solo JSON valido con esta forma:
+{{
+  "uses_context": true,
+  "standalone_question": "pregunta autonoma en español",
+  "referenced_entities": ["entidades usadas de la memoria"]
+}}
+"""
+
 CYPHER_GENERATION_PROMPT = """
 Eres un asistente experto en Neo4j Cypher para una base de datos de publicaciones académicas.
 
@@ -43,10 +71,10 @@ venues, años y citas.
 Esquema del grafo:
 {schema}
 
-Historial de la conversación:
+Memoria de la conversación:
 {history}
 
-Pregunta actual:
+Pregunta actual resuelta:
 {question}
 
 Objetivo:
@@ -117,8 +145,11 @@ Salida:
 ANSWER_PROMPT = """
 Eres un asistente en español para consultas sobre un grafo de publicaciones académicas.
 
-Pregunta del usuario:
+Pregunta original del usuario:
 {question}
+
+Pregunta resuelta con memoria:
+{resolved_question}
 
 Cypher ejecutado:
 {cypher_query}

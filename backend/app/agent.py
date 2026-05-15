@@ -13,6 +13,7 @@ from app.logging_config import summarize_exception
 from app.neo4j_client import neo4j_client
 from app.prompts import (
     ANSWER_PROMPT,
+    CONTEXT_RESOLUTION_PROMPT,
     CYPHER_GENERATION_PROMPT,
     GRAPH_SCHEMA,
     OUT_OF_DOMAIN_RESPONSE,
@@ -45,34 +46,10 @@ TEXT_FILTER_ALIASES: dict[str, tuple[str, str]] = {
     "tipo_venue": ("tipo_venue", "tipos_venue_coincidentes"),
 }
 
-FOLLOW_UP_HINTS = (
-    "esa",
-    "ese",
-    "esas",
-    "esos",
-    "esta",
-    "este",
-    "estos",
-    "estas",
-    "dicha",
-    "dicho",
-    "anterior",
-    "anteriores",
-    "mencionada",
-    "mencionado",
-    "de ellas",
-    "de ellos",
-    "cuáles son",
-    "cuales son",
-    "qué año",
-    "que año",
-    "cuándo",
-    "cuando",
-)
-
 
 class AgentState(TypedDict):
     question: str
+    resolved_question: str
     history: str
     cypher_query: str | None
     results: list[dict[str, Any]]
@@ -199,148 +176,66 @@ def _similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, _normalize_text(left), _normalize_text(right)).ratio()
 
 
-def _is_follow_up_question(question: str) -> bool:
-    """Detecta preguntas cortas o referenciales que dependen del turno anterior."""
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    """Extrae un objeto JSON desde texto del LLM."""
 
-    normalized = _normalize_text(question)
-    if any(_normalize_text(hint) in normalized for hint in FOLLOW_UP_HINTS):
-        return True
-
-    words = re.findall(r"\w+", normalized)
-    return len(words) <= 5 and any(word in normalized for word in ("ano", "citas", "autor", "venue"))
-
-
-def _extract_last_publication_id(history: str) -> str | None:
-    """Obtiene el ultimo id_publicacion mencionado en respuestas o Cypher previos."""
-
-    matches = re.findall(r"\bPUB\d+\b", history, flags=re.IGNORECASE)
-    return matches[-1].upper() if matches else None
-
-
-def _extract_last_cypher(history: str) -> str | None:
-    """Extrae el ultimo Cypher registrado en el historial formateado."""
-
-    matches = re.findall(r"Cypher usado por el asistente:\s*(.+)", history)
-    return matches[-1].strip() if matches else None
-
-
-def _extract_requested_year(question: str) -> int | None:
-    """Obtiene un año de cuatro digitos desde la pregunta del usuario."""
-
-    match = re.search(r"\b(19\d{2}|20\d{2})\b", question)
-    return int(match.group(1)) if match else None
-
-
-def _extract_publication_variable(cypher_query: str) -> str | None:
-    """Detecta la variable usada para nodos `Publicación` en un Cypher previo."""
-
-    match = re.search(r"\((?P<variable>\w+)\s*:\s*`Publicaci[^`]*n`", cypher_query, flags=re.IGNORECASE)
-    return match.group("variable") if match else None
-
-
-def _build_year_filter_from_previous_cypher(question: str, history: str) -> str | None:
-    """Reutiliza el Cypher anterior y agrega un filtro por año para seguimientos."""
-
-    year = _extract_requested_year(question)
-    if year is None or not _is_follow_up_question(question):
+    cleaned = _strip_code_fences(text)
+    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if not match:
         return None
 
-    last_cypher = _extract_last_cypher(history)
-    if not last_cypher:
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
         return None
-
-    publication_variable = _extract_publication_variable(last_cypher)
-    if not publication_variable:
-        return None
-
-    prefix = re.split(r"\bRETURN\b", last_cypher, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-    if not prefix.lower().startswith("match "):
-        return None
-
-    logger.info(
-        "Seguimiento resuelto agregando filtro de año year=%s publication_variable=%s",
-        year,
-        publication_variable,
-    )
-    return (
-        f"{prefix} "
-        f"MATCH ({publication_variable})-[:PUBLICADA_EN_AÑO]->(anio:`Año`) "
-        f"WHERE anio.año = {year} "
-        f"RETURN {publication_variable}.id_publicacion AS id_publicacion, "
-        f"{publication_variable}.titulo AS titulo, "
-        f"{publication_variable}.numero_citas AS numero_citas, "
-        "anio.año AS año_publicacion "
-        "LIMIT 20"
-    )
+    return parsed if isinstance(parsed, dict) else None
 
 
-def _build_contextual_question(question: str, history: str) -> str:
-    """Agrega contexto conversacional explicito para que el LLM no pierda referencias."""
+def _resolve_question_with_memory(question: str, history: str) -> str:
+    """Reescribe la pregunta usando memoria activa sin reglas por palabras fijas."""
 
-    if not _is_follow_up_question(question) or history == "Sin historial previo.":
+    if history.strip() == "Sin historial previo.":
         return question
 
-    context_lines = [
-        question,
-        "",
-        "Esta es una pregunta de seguimiento. Usa el contexto activo de la conversacion anterior.",
-    ]
-    publication_id = _extract_last_publication_id(history)
-    if publication_id:
-        context_lines.append(f"Publicacion previa identificada: id_publicacion={publication_id}.")
-
-    last_cypher = _extract_last_cypher(history)
-    if last_cypher:
-        context_lines.append(f"Cypher previo relevante: {last_cypher}")
-
-    context_lines.append("No la clasifiques como fuera de dominio si se refiere a publicaciones, autores, años, citas, venues, areas, paises o palabras clave previas.")
-    contextual_question = "\n".join(context_lines)
-    logger.info("Pregunta de seguimiento contextualizada publication_id=%s has_last_cypher=%s", publication_id, bool(last_cypher))
-    return contextual_question
-
-
-def _resolve_follow_up_cypher(question: str, history: str) -> str | None:
-    """Resuelve seguimientos obvios sin depender del LLM."""
-
-    if not _is_follow_up_question(question):
-        return None
-
-    year_filter_cypher = _build_year_filter_from_previous_cypher(question, history)
-    if year_filter_cypher:
-        return year_filter_cypher
-
-    publication_id = _extract_last_publication_id(history)
-    if not publication_id:
-        return None
-
-    normalized = _normalize_text(question)
-    if "ano" in normalized or "cuando" in normalized or "fecha" in normalized:
-        logger.info("Seguimiento resuelto por id_publicacion para año publication_id=%s", publication_id)
-        return (
-            "MATCH (p:`Publicación` {id_publicacion: \""
-            f"{publication_id}"
-            "\"})-[:PUBLICADA_EN_AÑO]->(anio:`Año`) "
-            "RETURN p.id_publicacion AS id_publicacion, p.titulo AS titulo, anio.año AS año_publicacion "
-            "LIMIT 20"
+    prompt = CONTEXT_RESOLUTION_PROMPT.format(history=history, question=question)
+    try:
+        response = _invoke_llm(prompt)
+    except Exception as exc:
+        logger.warning(
+            "No se pudo resolver contexto conversacional error_type=%s error=%s",
+            type(exc).__name__,
+            summarize_exception(exc),
         )
+        return question
 
-    return None
+    parsed = _extract_json_object(response)
+    if not parsed:
+        logger.warning("Resolucion contextual no devolvio JSON valido response_preview=%s", response[:180])
+        return question
+
+    standalone_question = parsed.get("standalone_question")
+    if not isinstance(standalone_question, str) or not standalone_question.strip():
+        return question
+
+    uses_context = bool(parsed.get("uses_context"))
+    referenced_entities = parsed.get("referenced_entities")
+    logger.info(
+        "Pregunta resuelta con memoria uses_context=%s referenced_entities=%s",
+        uses_context,
+        referenced_entities if isinstance(referenced_entities, list) else [],
+    )
+    return standalone_question.strip()
 
 
 def _generate_cypher(state: AgentState) -> AgentState:
     """Primer nodo LangGraph: genera Cypher o detecta pregunta fuera de dominio."""
 
     logger.info("LangGraph node=generate_cypher question_length=%s", len(state["question"]))
-    resolved_cypher = _resolve_follow_up_cypher(state["question"], state["history"])
-    if resolved_cypher:
-        logger.info("Cypher generado por resolucion deterministica de seguimiento")
-        return {**state, "cypher_query": _ensure_filter_values_returned(resolved_cypher), "out_of_domain": False}
-
-    contextual_question = _build_contextual_question(state["question"], state["history"])
+    resolved_question = _resolve_question_with_memory(state["question"], state["history"])
     prompt = CYPHER_GENERATION_PROMPT.format(
         schema=GRAPH_SCHEMA,
         history=state["history"],
-        question=contextual_question,
+        question=resolved_question,
     )
     cypher = _strip_code_fences(_invoke_llm(prompt))
     logger.info("Cypher generado raw_length=%s", len(cypher))
@@ -353,11 +248,17 @@ def _generate_cypher(state: AgentState) -> AgentState:
             "results": [],
             "answer": OUT_OF_DOMAIN_RESPONSE,
             "out_of_domain": True,
+            "resolved_question": resolved_question,
         }
 
     cypher = _ensure_filter_values_returned(cypher)
     logger.info("Cypher listo preview=%s", cypher[:180].replace("\n", " "))
-    return {**state, "cypher_query": cypher, "out_of_domain": False}
+    return {
+        **state,
+        "resolved_question": resolved_question,
+        "cypher_query": cypher,
+        "out_of_domain": False,
+    }
 
 
 def _execute_cypher(state: AgentState) -> AgentState:
@@ -522,6 +423,7 @@ def _generate_answer(state: AgentState) -> AgentState:
     logger.info("LangGraph node=generate_answer results_count=%s", len(state["results"]))
     prompt = ANSWER_PROMPT.format(
         question=state["question"],
+        resolved_question=state["resolved_question"],
         cypher_query=state["cypher_query"],
         results=json.dumps(state["results"], ensure_ascii=False, default=str),
     )
@@ -566,6 +468,7 @@ def run_agent(question: str, history: str) -> dict[str, Any]:
     logger.info("run_agent start question_length=%s history_length=%s", len(question), len(history))
     initial_state: AgentState = {
         "question": question,
+        "resolved_question": question,
         "history": history,
         "cypher_query": None,
         "results": [],

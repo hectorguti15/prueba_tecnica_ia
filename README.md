@@ -547,22 +547,30 @@ Sophie Lauren -> Sophie Laurent
 
 ## Limitaciones
 
-### Que quedo fuera y por que
+Esta seccion resume que quedo fuera y por que, siguiendo el alcance pedido en el enunciado.
 
-- **Resumenes/abstracts completos de publicaciones**: no se incluyeron para mantener el grafo liviano y porque el CSV no provee ese texto.
-- **DOI, URL, ISBN o identificadores externos**: utiles para integracion bibliografica, pero no estan en el dataset base.
-- **Coautoria como relacion directa Autor-Autor**: puede derivarse navegando por publicaciones compartidas; se evita duplicar informacion.
-- **Orden de autor como propiedad de `ESCRIBIO`**: el CSV contiene `orden_autor`, pero el esquema operativo actual no lo usa en el prompt del agente para mantener las consultas simples. Se puede agregar en una extension.
-- **Metadatos personales sensibles de autores**: no se incluyen por privacidad y porque no son necesarios para consultas academicas basicas.
-- **Embeddings o busqueda semantica vectorial**: el proyecto usa Cypher y fuzzy match textual; embeddings quedan como mejora futura.
-- **Autenticacion de usuarios**: el foco es la prueba tecnica del agente y el grafo, no control de acceso.
-- **Backend y frontend en Docker**: Docker se usa solo para PostgreSQL para simplificar desarrollo local.
+### Modelo de grafo y datos
 
-### Consideraciones operativas
+- **Resumenes o abstracts completos de publicaciones**: no se incluyeron porque el CSV entregado no trae ese campo. El grafo se limita a los atributos disponibles: titulo, citas, autores, instituciones, paises, areas, palabras clave, venues y anios.
+- **DOI, URL, ISBN u otros identificadores externos**: serian utiles para integraciones bibliograficas, pero no forman parte del dataset base. Agregarlos requeriria enriquecer datos desde una fuente externa.
+- **Relacion directa de coautoria Autor-Autor**: no se modelo como arista propia porque la coautoria se puede inferir desde publicaciones compartidas. Se eligio evitar duplicar informacion derivada y mantener un modelo mas simple para el agente.
+- **`orden_autor` en la relacion `ESCRIBIO`**: el CSV incluye este dato, pero no se uso en el esquema consultado por el agente. Se priorizaron consultas principales sobre autores, publicaciones, areas, paises, venues y citas; el orden de autoria queda como una mejora futura si se requieren preguntas sobre primer autor o autor de correspondencia.
+- **Carga automatizada por script**: se eligio Neo4j AuraDB con Data Importer porque el enunciado lo recomienda como camino rapido y limpio para esta prueba. Por eso el repositorio documenta el mapeo y la carga, pero no incluye un pipeline ETL propio para recrear el grafo desde cero.
 
-- El LLM puede generar Cypher incorrecto; por eso el backend tiene validacion read-only, normalizacion y reintento de correccion.
-- El fuzzy match solo se activa si la consulta inicial no devuelve filas.
-- Las credenciales reales deben vivir en `.env`, nunca en Git.
+### Agente y busqueda
+
+- **LangGraph en lugar de una cadena simple de LangChain**: se eligio LangGraph porque permite separar el flujo en nodos claros: generacion de Cypher, ejecucion, reintento por error, fuzzy match y respuesta final. Una cadena simple habria sido suficiente para el flujo minimo, pero era menos flexible para los extras implementados.
+- **Groq como proveedor LLM principal**: se eligio por facilidad de uso, baja latencia y disponibilidad de modelos en free tier. No se implementaron adaptadores activos para Gemini, OpenAI u Ollama; el proyecto queda preparado a nivel conceptual para cambiar de proveedor, pero el codigo actual llama a Groq.
+- **Validacion semantica independiente del Cypher**: el agente exige labels, relaciones y propiedades exactas desde el prompt y el backend bloquea consultas de escritura, pero no existe un validador semantico completo que parsee el Cypher antes de ejecutarlo. Los errores de sintaxis se corrigen con un reintento apoyado en Neo4j y el LLM.
+- **Busqueda semantica con embeddings**: no se implemento una busqueda vectorial sobre titulos, palabras clave o abstracts. Para mantener el alcance acotado, se uso Cypher con filtros textuales y fuzzy match cuando una consulta no devuelve resultados.
+- **Memoria conversacional perfecta**: se implemento ventana deslizante con resumenes persistidos, pero en conversaciones muy largas o con referencias ambiguas el agente podria perder contexto fino. Se eligio esta estrategia por ser explicita, simple de auditar y suficiente para los casos pedidos.
+
+### Aplicacion y seguridad
+
+- **Autenticacion y roles de usuario**: no se implementaron porque el foco de la prueba es el agente sobre Neo4j, la memoria de sesion y la persistencia de chats. En un entorno productivo harian falta login, permisos y separacion de conversaciones por usuario.
+- **Proteccion avanzada contra abuso**: el backend bloquea Cypher destructivo y el prompt rechaza preguntas fuera del dominio, pero no incluye rate limiting, auditoria de seguridad, moderacion externa ni un sandbox de ejecucion mas profundo.
+- **SQLite recomendado vs PostgreSQL elegido**: el enunciado sugiere SQLite por simplicidad, pero permite usar otra base. Se eligio PostgreSQL porque el historial, mensajes y resumenes de memoria quedan en una base relacional robusta y cercana a un escenario real, a cambio de requerir Docker para desarrollo local.
+- **Backend y frontend fuera de Docker**: Docker se usa solo para PostgreSQL. Se dejo FastAPI y React corriendo en local para reducir complejidad de contenedores y facilitar la demo, aunque una entrega productiva podria incluir `Dockerfile` para ambos servicios.
 
 ## Endpoints Principales
 

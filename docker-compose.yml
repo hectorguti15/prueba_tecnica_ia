@@ -1,0 +1,23 @@
+services:
+  postgres:
+    # PostgreSQL es el unico servicio Docker de esta version.
+    # Neo4j corre en AuraDB, por eso no se define un contenedor Neo4j aqui.
+    image: postgres:${POSTGRES_VERSION:-16}
+    container_name: agente_neo4j_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agente_neo4j}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-agente_neo4j}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
